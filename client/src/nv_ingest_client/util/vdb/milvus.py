@@ -221,7 +221,9 @@ def _dict_to_params(collections_dict: dict, write_params: dict):
     return params_tuple_list
 
 
-def create_nvingest_schema(dense_dim: int = 1024, sparse: bool = False, local_index: bool = False) -> CollectionSchema:
+def create_nvingest_schema(
+    dense_dim: int = 1024, sparse: bool = False, local_index: bool = False, meta_fields_dtypes: dict = None
+) -> CollectionSchema:
     """
     Creates a schema for the nv-ingest produced data. This is currently setup to follow
     the default expected schema fields in nv-ingest. You can see more about the declared fields
@@ -275,6 +277,12 @@ def create_nvingest_schema(dense_dim: int = 1024, sparse: bool = False, local_in
 
     else:
         schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=65535)
+    if meta_fields_dtypes:
+        for field_name, field_dtype in meta_fields_dtypes.items():
+            if field_dtype is DataType.VARCHAR:
+                schema.add_field(field_name=field_name, datatype=field_dtype, max_length=65535, nullable=True)
+            else:
+                schema.add_field(field_name=field_name, datatype=field_dtype, nullable=True)
     return schema
 
 
@@ -401,6 +409,10 @@ def create_nvingest_collection(
     gpu_search: bool = False,
     dense_dim: int = 2048,
     recreate_meta: bool = False,
+    meta_dataframe=None,
+    meta_source_field=None,
+    meta_fields=None,
+    **kwargs,
 ) -> CollectionSchema:
     """
     Creates a milvus collection with an nv-ingest compatible schema under
@@ -442,7 +454,29 @@ def create_nvingest_collection(
             local_index = True
 
     client = MilvusClient(milvus_uri)
-    schema = create_nvingest_schema(dense_dim=dense_dim, sparse=sparse, local_index=local_index)
+    meta_fields_dtypes = {}
+    if isinstance(meta_dataframe, str):
+        meta_dataframe = pandas_file_reader(meta_dataframe)
+    if meta_dataframe is not None and meta_source_field and meta_fields:
+        sub_meta_dataframe = meta_dataframe[meta_fields]
+        for column in sub_meta_dataframe.columns:
+            valid_idx = sub_meta_dataframe[column].first_valid_index()
+            value = sub_meta_dataframe[column].iloc[valid_idx]
+            if isinstance(value, list):
+                meta_fields_dtypes[column] = DataType.ARRAY
+            elif isinstance(value, str):
+                meta_fields_dtypes[column] = DataType.VARCHAR
+            elif isinstance(value, (bool, np.bool_)):
+                meta_fields_dtypes[column] = DataType.BOOL
+            elif isinstance(value, (int, np.int32, np.int64)):
+                meta_fields_dtypes[column] = DataType.INT64
+            elif isinstance(value, (float, np.float32, np.float64)):
+                meta_fields_dtypes[column] = DataType.FLOAT
+            else:
+                meta_fields_dtypes[column] = value.dtype
+    schema = create_nvingest_schema(
+        dense_dim=dense_dim, sparse=sparse, local_index=local_index, meta_fields_dtypes=meta_fields_dtypes
+    )
     index_params = create_nvingest_index_params(
         sparse=sparse,
         gpu_index=gpu_index,
@@ -523,6 +557,9 @@ def _record_dict(text, element, sparse_vector: csr_array = None):
     }
     # need to grab the user defined fields and add them to the content_metadata
     record["content_metadata"].update(cp_element["metadata"])
+    cp_element.pop("metadata")
+    cp_element.pop("document_type")
+    record.update(cp_element)
     if sparse_vector is not None:
         record["sparse"] = _format_sparse_embedding(sparse_vector)
     return record
@@ -684,7 +721,8 @@ def add_metadata(element, meta_dataframe, meta_source_field, meta_data_fields):
             field = float(field)
         elif isinstance(field, (np.bool_)):
             field = bool(field)
-        element["metadata"][col] = field
+        if field is not None:
+            element[col] = field
 
 
 def write_records_minio(records, writer: RemoteBulkWriter) -> RemoteBulkWriter:
@@ -1878,14 +1916,16 @@ class Milvus(VDB):
         reindex_collection(current_collection_name=collection_name, **kwargs)
 
     def get_connection_params(self):
-        conn_dict = {
-            "milvus_uri": self.__dict__.get("milvus_uri", "http://localhost:19530"),
-            "sparse": self.__dict__.get("sparse", True),
-            "recreate": self.__dict__.get("recreate", True),
-            "gpu_index": self.__dict__.get("gpu_index", True),
-            "gpu_search": self.__dict__.get("gpu_search", True),
-            "dense_dim": self.__dict__.get("dense_dim", 2048),
-        }
+        conn_dict = self.__dict__.copy()
+        conn_dict.pop("collection_name", None)
+        # conn_dict = {
+        #     "milvus_uri": self.__dict__.get("milvus_uri", "http://localhost:19530"),
+        #     "sparse": self.__dict__.get("sparse", True),
+        #     "recreate": self.__dict__.get("recreate", True),
+        #     "gpu_index": self.__dict__.get("gpu_index", True),
+        #     "gpu_search": self.__dict__.get("gpu_search", True),
+        #     "dense_dim": self.__dict__.get("dense_dim", 2048),
+        # }
         return (self.collection_name, conn_dict)
 
     def get_write_params(self):
