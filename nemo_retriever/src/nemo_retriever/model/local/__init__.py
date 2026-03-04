@@ -17,6 +17,7 @@ __all__ = [
     "NemotronTableStructureV1",
     "NemotronGraphicElementsV1",
     "NemotronParseV12",
+    "NemotronNanoVL12BV2",
     "ParakeetCTC1B1ASR",
 ]
 
@@ -42,6 +43,10 @@ def __getattr__(name: str):
         from .nemotron_parse_v1_2 import NemotronParseV12
 
         return NemotronParseV12
+    if name == "NemotronNanoVL12BV2":
+        from .nemotron_nano_vl_12b_v2 import NemotronNanoVL12BV2
+
+        return NemotronNanoVL12BV2
     if name == "ParakeetCTC1B1ASR":
         from .parakeet_ctc_1_1b_asr import ParakeetCTC1B1ASR
 

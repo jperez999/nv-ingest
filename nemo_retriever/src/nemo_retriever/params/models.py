@@ -267,3 +267,21 @@ class InfographicParams(_ParamsModel):
     output_column: str = "infographic_elements_v1"
     num_detections_column: str = "infographic_elements_v1_num_detections"
     counts_by_label_column: str = "infographic_elements_v1_counts_by_label"
+
+
+class VLMCaptionParams(_ParamsModel):
+    invoke_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model_name: str = "nvidia/nemotron-nano-12b-v2-vl"
+    prompt: str = "Caption the content of this image:"
+    system_prompt: Optional[str] = "/no_think"
+    max_tokens: int = 512
+    temperature: float = 1.0
+    caption_page_images: bool = True
+    caption_tables: bool = False
+    caption_charts: bool = False
+    caption_infographics: bool = False
+    request_timeout_s: float = 120.0
+    device: Optional[str] = None
+    hf_cache_dir: Optional[str] = None
+    remote_retry: RemoteRetryParams = Field(default_factory=RemoteRetryParams)

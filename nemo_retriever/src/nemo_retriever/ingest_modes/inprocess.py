@@ -56,6 +56,7 @@ from ..params import HtmlChunkParams
 from ..params import IngestExecuteParams
 from ..params import TextChunkParams
 from ..params import VdbUploadParams
+from ..params import VLMCaptionParams
 from ..pdf.extract import pdf_extraction
 from ..pdf.split import _split_pdf_to_single_page_bytes, pdf_path_to_pages_df
 from ..txt import txt_file_to_chunks_df
@@ -1405,6 +1406,41 @@ class InProcessIngestor(Ingestor):
         self._extract_audio_chunk_kwargs = chunk_resolved.model_dump(mode="python")
         self._extract_audio_asr_kwargs = asr_resolved.model_dump(mode="python")
         self._tasks.append((apply_asr_to_df, {"asr_params": self._extract_audio_asr_kwargs}))
+        return self
+
+    def caption(self, params: VLMCaptionParams | None = None, **kwargs: Any) -> "InProcessIngestor":
+        """
+        Configure VLM image captioning for in-process execution.
+
+        When ``invoke_url`` is provided, delegates to a remote vLLM / NIM
+        endpoint.  Otherwise, loads ``NemotronNanoVL12BV2`` locally.
+        """
+        from nemo_retriever.vlm_captioning import vlm_caption_images
+
+        resolved = _coerce_params(params, VLMCaptionParams, kwargs)
+        caption_kwargs: dict[str, Any] = {
+            **resolved.model_dump(mode="python", exclude={"remote_retry"}, exclude_none=True),
+            **resolved.remote_retry.model_dump(mode="python", exclude_none=True),
+        }
+
+        endpoint = (caption_kwargs.get("invoke_url") or "").strip()
+        if endpoint:
+            # Remote mode: no local model needed.
+            caption_kwargs["model"] = None
+        else:
+            # Local HF model.
+            from nemo_retriever.model.local import NemotronNanoVL12BV2
+
+            device = caption_kwargs.pop("device", None)
+            hf_cache_dir = caption_kwargs.pop("hf_cache_dir", None)
+            caption_kwargs["model"] = NemotronNanoVL12BV2(
+                device=device,
+                hf_cache_dir=hf_cache_dir,
+                max_tokens=int(caption_kwargs.get("max_tokens", 512)),
+                temperature=float(caption_kwargs.get("temperature", 1.0)),
+            )
+
+        self._tasks.append((vlm_caption_images, caption_kwargs))
         return self
 
     def embed(self, params: EmbedParams | None = None, **kwargs: Any) -> "InProcessIngestor":

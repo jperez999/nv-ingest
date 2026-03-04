@@ -40,6 +40,7 @@ from ..params import IngestExecuteParams
 from ..params import PdfSplitParams
 from ..params import TextChunkParams
 from ..params import VdbUploadParams
+from ..params import VLMCaptionParams
 
 DEBUG_LOG_PATH = "/home/jeremy/Development/nv-ingest/.cursor/debug-250ae2.log"
 
@@ -795,6 +796,47 @@ class BatchIngestor(Ingestor):
             num_gpus=0,
             fn_constructor_kwargs={"params": ASRParams(**self._extract_audio_asr_kwargs)},
         )
+        return self
+
+    def caption(self, params: VLMCaptionParams | None = None, **kwargs: Any) -> "BatchIngestor":
+        """
+        Add a VLM image captioning stage to the batch pipeline.
+
+        When ``invoke_url`` is provided, delegates to a remote vLLM / NIM
+        endpoint (no GPU needed for this stage).  Otherwise, loads
+        ``NemotronNanoVL12BV2`` locally (1 GPU per actor).
+
+        Resource-tuning kwargs:
+
+        - ``caption_batch_size``: Ray Data batch size (default 4).
+        - ``caption_workers``: ActorPool size (default 1).
+        """
+        from nemo_retriever.vlm_captioning import VLMCaptioningActor
+
+        resolved = _coerce_params(params, VLMCaptionParams, kwargs)
+        flat: dict[str, Any] = {
+            **resolved.model_dump(mode="python", exclude={"remote_retry"}, exclude_none=True),
+            **resolved.remote_retry.model_dump(mode="python", exclude_none=True),
+        }
+        self._tasks.append(("caption", dict(flat)))
+
+        caption_batch_size = int(flat.pop("caption_batch_size", 4))
+        caption_workers = int(flat.pop("caption_workers", 1))
+
+        # GPU only needed for local model (no invoke_url).
+        endpoint = (flat.get("invoke_url") or "").strip()
+        gpu_per_stage = 0.0 if endpoint else 1.0
+
+        self._rd_dataset = self._rd_dataset.map_batches(
+            VLMCaptioningActor,
+            batch_size=caption_batch_size,
+            batch_format="pandas",
+            num_cpus=1,
+            num_gpus=gpu_per_stage,
+            compute=rd.ActorPoolStrategy(size=caption_workers),
+            fn_constructor_kwargs=flat,
+        )
+
         return self
 
     def embed(self, params: EmbedParams | None = None, **kwargs: Any) -> "BatchIngestor":

@@ -27,6 +27,7 @@ from nemo_retriever.params import IngestExecuteParams
 from nemo_retriever.params import IngestorCreateParams
 from nemo_retriever.params import TextChunkParams
 from nemo_retriever.params import VdbUploadParams
+from nemo_retriever.params import VLMCaptionParams
 from nemo_retriever.recall.core import RecallConfig, retrieve_and_score
 
 app = typer.Typer()
@@ -586,6 +587,41 @@ def main(
         "--hybrid/--no-hybrid",
         help="Enable LanceDB hybrid mode (dense + FTS text).",
     ),
+    caption: bool = typer.Option(
+        False,
+        "--caption/--no-caption",
+        help="Enable VLM image captioning stage (pdf/doc pipelines only).",
+    ),
+    caption_invoke_url: Optional[str] = typer.Option(
+        None,
+        "--caption-invoke-url",
+        help="Optional remote endpoint URL for VLM caption model inference. Uses local GPU model when omitted.",
+    ),
+    caption_model_name: str = typer.Option(
+        "nvidia/nemotron-nano-12b-v2-vl",
+        "--caption-model-name",
+        help="VLM model name for captioning.",
+    ),
+    caption_page_images: bool = typer.Option(
+        True,
+        "--caption-page-images/--no-caption-page-images",
+        help="Caption full page images.",
+    ),
+    caption_tables: bool = typer.Option(
+        False,
+        "--caption-tables/--no-caption-tables",
+        help="Caption detected tables.",
+    ),
+    caption_charts: bool = typer.Option(
+        False,
+        "--caption-charts/--no-caption-charts",
+        help="Caption detected charts.",
+    ),
+    caption_infographics: bool = typer.Option(
+        False,
+        "--caption-infographics/--no-caption-infographics",
+        help="Caption detected infographics.",
+    ),
 ) -> None:
     log_handle, original_stdout, original_stderr = _configure_logging(log_file)
     try:
@@ -685,61 +721,68 @@ def main(
                 run_mode="batch",
                 params=IngestorCreateParams(ray_address=ray_address, ray_log_to_driver=ray_log_to_driver),
             )
-            ingestor = (
-                ingestor.files(doc_globs)
-                .extract(
-                    ExtractParams(
-                        extract_text=True,
-                        extract_tables=True,
-                        extract_charts=True,
-                        extract_infographics=False,
-                        page_elements_invoke_url=page_elements_invoke_url,
-                        ocr_invoke_url=ocr_invoke_url,
-                        batch_tuning={
-                            "debug_run_id": str(runtime_metrics_prefix or "unknown"),
-                            "pdf_extract_workers": int(pdf_extract_workers),
-                            "pdf_extract_num_cpus": float(pdf_extract_num_cpus),
-                            "pdf_split_batch_size": int(pdf_split_batch_size),
-                            "pdf_extract_batch_size": int(pdf_extract_batch_size),
-                            "page_elements_batch_size": int(page_elements_batch_size),
-                            "page_elements_workers": int(page_elements_workers),
-                            "detect_workers": int(ocr_workers),
-                            "detect_batch_size": int(ocr_batch_size),
-                            "page_elements_cpus_per_actor": float(page_elements_cpus_per_actor),
-                            "ocr_cpus_per_actor": float(ocr_cpus_per_actor),
-                            "gpu_page_elements": float(gpu_page_elements),
-                            "gpu_ocr": float(gpu_ocr),
-                            "gpu_embed": float(gpu_embed),
-                            "nemotron_parse_workers": float(nemotron_parse_workers),
-                            "gpu_nemotron_parse": float(gpu_nemotron_parse),
-                            "nemotron_parse_batch_size": float(nemotron_parse_batch_size),
-                        },
+            ingestor = ingestor.files(doc_globs).extract(
+                ExtractParams(
+                    extract_text=True,
+                    extract_tables=True,
+                    extract_charts=True,
+                    extract_infographics=False,
+                    page_elements_invoke_url=page_elements_invoke_url,
+                    ocr_invoke_url=ocr_invoke_url,
+                    batch_tuning={
+                        "debug_run_id": str(runtime_metrics_prefix or "unknown"),
+                        "pdf_extract_workers": int(pdf_extract_workers),
+                        "pdf_extract_num_cpus": float(pdf_extract_num_cpus),
+                        "pdf_split_batch_size": int(pdf_split_batch_size),
+                        "pdf_extract_batch_size": int(pdf_extract_batch_size),
+                        "page_elements_batch_size": int(page_elements_batch_size),
+                        "page_elements_workers": int(page_elements_workers),
+                        "detect_workers": int(ocr_workers),
+                        "detect_batch_size": int(ocr_batch_size),
+                        "page_elements_cpus_per_actor": float(page_elements_cpus_per_actor),
+                        "ocr_cpus_per_actor": float(ocr_cpus_per_actor),
+                        "gpu_page_elements": float(gpu_page_elements),
+                        "gpu_ocr": float(gpu_ocr),
+                        "gpu_embed": float(gpu_embed),
+                        "nemotron_parse_workers": float(nemotron_parse_workers),
+                        "gpu_nemotron_parse": float(gpu_nemotron_parse),
+                        "nemotron_parse_batch_size": float(nemotron_parse_batch_size),
+                    },
+                )
+            )
+            if caption:
+                ingestor = ingestor.caption(
+                    VLMCaptionParams(
+                        invoke_url=caption_invoke_url,
+                        model_name=str(caption_model_name),
+                        caption_page_images=caption_page_images,
+                        caption_tables=caption_tables,
+                        caption_charts=caption_charts,
+                        caption_infographics=caption_infographics,
                     )
                 )
-                .embed(
-                    EmbedParams(
-                        model_name=str(embed_model_name),
-                        embed_invoke_url=embed_invoke_url,
-                        embed_modality=embed_modality,
-                        text_elements_modality=text_elements_modality,
-                        structured_elements_modality=structured_elements_modality,
-                        batch_tuning={
-                            "embed_workers": int(embed_workers),
-                            "embed_batch_size": int(embed_batch_size),
-                            "embed_cpus_per_actor": float(embed_cpus_per_actor),
-                        },
-                    )
+            ingestor = ingestor.embed(
+                EmbedParams(
+                    model_name=str(embed_model_name),
+                    embed_invoke_url=embed_invoke_url,
+                    embed_modality=embed_modality,
+                    text_elements_modality=text_elements_modality,
+                    structured_elements_modality=structured_elements_modality,
+                    batch_tuning={
+                        "embed_workers": int(embed_workers),
+                        "embed_batch_size": int(embed_batch_size),
+                        "embed_cpus_per_actor": float(embed_cpus_per_actor),
+                    },
                 )
-                .vdb_upload(
-                    VdbUploadParams(
-                        lancedb={
-                            "lancedb_uri": lancedb_uri,
-                            "table_name": LANCEDB_TABLE,
-                            "overwrite": True,
-                            "create_index": True,
-                            "hybrid": hybrid,
-                        }
-                    )
+            ).vdb_upload(
+                VdbUploadParams(
+                    lancedb={
+                        "lancedb_uri": lancedb_uri,
+                        "table_name": LANCEDB_TABLE,
+                        "overwrite": True,
+                        "create_index": True,
+                        "hybrid": hybrid,
+                    }
                 )
             )
         else:
@@ -748,61 +791,68 @@ def main(
                 run_mode="batch",
                 params=IngestorCreateParams(ray_address=ray_address, ray_log_to_driver=ray_log_to_driver),
             )
-            ingestor = (
-                ingestor.files(pdf_glob)
-                .extract(
-                    ExtractParams(
-                        extract_text=True,
-                        extract_tables=True,
-                        extract_charts=True,
-                        extract_infographics=False,
-                        page_elements_invoke_url=page_elements_invoke_url,
-                        ocr_invoke_url=ocr_invoke_url,
-                        batch_tuning={
-                            "debug_run_id": str(runtime_metrics_prefix or "unknown"),
-                            "pdf_extract_workers": int(pdf_extract_workers),
-                            "pdf_extract_num_cpus": float(pdf_extract_num_cpus),
-                            "pdf_split_batch_size": int(pdf_split_batch_size),
-                            "pdf_extract_batch_size": int(pdf_extract_batch_size),
-                            "page_elements_batch_size": int(page_elements_batch_size),
-                            "page_elements_workers": int(page_elements_workers),
-                            "detect_workers": int(ocr_workers),
-                            "detect_batch_size": int(ocr_batch_size),
-                            "page_elements_cpus_per_actor": float(page_elements_cpus_per_actor),
-                            "ocr_cpus_per_actor": float(ocr_cpus_per_actor),
-                            "gpu_page_elements": float(gpu_page_elements),
-                            "gpu_ocr": float(gpu_ocr),
-                            "gpu_embed": float(gpu_embed),
-                            "nemotron_parse_workers": float(nemotron_parse_workers),
-                            "gpu_nemotron_parse": float(gpu_nemotron_parse),
-                            "nemotron_parse_batch_size": float(nemotron_parse_batch_size),
-                        },
+            ingestor = ingestor.files(pdf_glob).extract(
+                ExtractParams(
+                    extract_text=True,
+                    extract_tables=True,
+                    extract_charts=True,
+                    extract_infographics=False,
+                    page_elements_invoke_url=page_elements_invoke_url,
+                    ocr_invoke_url=ocr_invoke_url,
+                    batch_tuning={
+                        "debug_run_id": str(runtime_metrics_prefix or "unknown"),
+                        "pdf_extract_workers": int(pdf_extract_workers),
+                        "pdf_extract_num_cpus": float(pdf_extract_num_cpus),
+                        "pdf_split_batch_size": int(pdf_split_batch_size),
+                        "pdf_extract_batch_size": int(pdf_extract_batch_size),
+                        "page_elements_batch_size": int(page_elements_batch_size),
+                        "page_elements_workers": int(page_elements_workers),
+                        "detect_workers": int(ocr_workers),
+                        "detect_batch_size": int(ocr_batch_size),
+                        "page_elements_cpus_per_actor": float(page_elements_cpus_per_actor),
+                        "ocr_cpus_per_actor": float(ocr_cpus_per_actor),
+                        "gpu_page_elements": float(gpu_page_elements),
+                        "gpu_ocr": float(gpu_ocr),
+                        "gpu_embed": float(gpu_embed),
+                        "nemotron_parse_workers": float(nemotron_parse_workers),
+                        "gpu_nemotron_parse": float(gpu_nemotron_parse),
+                        "nemotron_parse_batch_size": float(nemotron_parse_batch_size),
+                    },
+                )
+            )
+            if caption:
+                ingestor = ingestor.caption(
+                    VLMCaptionParams(
+                        invoke_url=caption_invoke_url,
+                        model_name=str(caption_model_name),
+                        caption_page_images=caption_page_images,
+                        caption_tables=caption_tables,
+                        caption_charts=caption_charts,
+                        caption_infographics=caption_infographics,
                     )
                 )
-                .embed(
-                    EmbedParams(
-                        model_name=str(embed_model_name),
-                        embed_invoke_url=embed_invoke_url,
-                        embed_modality=embed_modality,
-                        text_elements_modality=text_elements_modality,
-                        structured_elements_modality=structured_elements_modality,
-                        batch_tuning={
-                            "embed_workers": int(embed_workers),
-                            "embed_batch_size": int(embed_batch_size),
-                            "embed_cpus_per_actor": float(embed_cpus_per_actor),
-                        },
-                    )
+            ingestor = ingestor.embed(
+                EmbedParams(
+                    model_name=str(embed_model_name),
+                    embed_invoke_url=embed_invoke_url,
+                    embed_modality=embed_modality,
+                    text_elements_modality=text_elements_modality,
+                    structured_elements_modality=structured_elements_modality,
+                    batch_tuning={
+                        "embed_workers": int(embed_workers),
+                        "embed_batch_size": int(embed_batch_size),
+                        "embed_cpus_per_actor": float(embed_cpus_per_actor),
+                    },
                 )
-                .vdb_upload(
-                    VdbUploadParams(
-                        lancedb={
-                            "lancedb_uri": lancedb_uri,
-                            "table_name": LANCEDB_TABLE,
-                            "overwrite": True,
-                            "create_index": True,
-                            "hybrid": hybrid,
-                        }
-                    )
+            ).vdb_upload(
+                VdbUploadParams(
+                    lancedb={
+                        "lancedb_uri": lancedb_uri,
+                        "table_name": LANCEDB_TABLE,
+                        "overwrite": True,
+                        "create_index": True,
+                        "hybrid": hybrid,
+                    }
                 )
             )
 

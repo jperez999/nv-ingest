@@ -26,6 +26,7 @@ from nemo_retriever.params import IngestExecuteParams
 from nemo_retriever.params import IngestorCreateParams
 from nemo_retriever.params import RunMode
 from nemo_retriever.params import VdbUploadParams
+from nemo_retriever.params import VLMCaptionParams
 
 
 def _merge_params[T](params: T | None, kwargs: dict[str, Any]) -> T:
@@ -169,8 +170,9 @@ class ingestor:
         """Record result persistence configuration (execution TBD)."""
         self._not_implemented("save_to_disk")
 
-    def caption(self) -> "ingestor":
+    def caption(self, params: VLMCaptionParams | None = None, **kwargs: Any) -> "ingestor":
         """Record a caption task configuration."""
+        _ = _merge_params(params, kwargs)
         self._not_implemented("caption")
 
     def pdf_split_config(self, pages_per_chunk: int = 32) -> "ingestor":

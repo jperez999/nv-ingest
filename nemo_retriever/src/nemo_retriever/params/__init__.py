@@ -25,6 +25,7 @@ from .models import RunMode
 from .models import TableParams
 from .models import TextChunkParams
 from .models import VdbUploadParams
+from .models import VLMCaptionParams
 
 __all__ = [
     "ASRParams",
@@ -50,4 +51,5 @@ __all__ = [
     "TableParams",
     "TextChunkParams",
     "VdbUploadParams",
+    "VLMCaptionParams",
 ]
