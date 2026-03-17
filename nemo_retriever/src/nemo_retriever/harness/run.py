@@ -297,14 +297,20 @@ def _consume_parseable_output(metrics: StreamMetrics, parse_buffer: str) -> str:
     return parse_buffer
 
 
-def _run_subprocess_with_tty(cmd: list[str], metrics: StreamMetrics) -> int:
+def _run_subprocess_with_tty(cmd: list[str], metrics: StreamMetrics) -> tuple[int, str]:
     """
     Run command in a pseudo-terminal so Ray renders rich progress.
 
     We still parse lines from the PTY stream to extract benchmark metrics.
+
+    Returns:
+        (return_code, full_output) where full_output is the complete text
+        collected from the PTY (stdout + stderr interleaved), with ANSI codes
+        stripped and carriage returns normalised to newlines.
     """
     master_fd, slave_fd = pty.openpty()
     parse_buffer = ""
+    output_chunks: list[str] = []
     try:
         proc = subprocess.Popen(
             cmd,
@@ -339,14 +345,17 @@ def _run_subprocess_with_tty(cmd: list[str], metrics: StreamMetrics) -> int:
             sys.stdout.write(text)
             sys.stdout.flush()
 
-            parse_buffer += text.replace("\r", "\n")
+            normalised = text.replace("\r", "\n")
+            output_chunks.append(normalised)
+            parse_buffer += normalised
             parse_buffer = _consume_parseable_output(metrics, parse_buffer)
 
         if parse_buffer:
             cleaned_tail = ANSI_ESCAPE_RE.sub("", parse_buffer)
             metrics.consume(cleaned_tail)
 
-        return proc.wait()
+        full_output = ANSI_ESCAPE_RE.sub("", "".join(output_chunks))
+        return proc.wait(), full_output
     finally:
         os.close(master_fd)
 
@@ -360,7 +369,7 @@ def _run_single(cfg: HarnessConfig, artifact_dir: Path, run_id: str, tags: list[
     typer.echo(command_text)
 
     metrics = StreamMetrics()
-    process_rc = _run_subprocess_with_tty(cmd, metrics)
+    process_rc, process_output = _run_subprocess_with_tty(cmd, metrics)
     run_metadata = _collect_run_metadata()
     runtime_summary_path = runtime_dir / f"{run_id}.runtime.summary.json"
     runtime_summary = _read_json_if_exists(runtime_summary_path)
@@ -494,7 +503,6 @@ def execute_runs(
 ) -> tuple[Path, list[dict[str, Any]]]:
     session_dir = create_session_dir(session_prefix, base_dir=base_artifacts_dir)
     run_results: list[dict[str, Any]] = []
-
     for idx, run in enumerate(runs):
         run_name = str(run.get("name") or f"run_{idx + 1:03d}")
         run_result = _run_entry(

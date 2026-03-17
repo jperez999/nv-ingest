@@ -12,8 +12,21 @@ INGEST_ROWS_RE = re.compile(
     r"Ingestion complete\.\s+(?P<rows>\d+)\s+rows\s+proces+ed\s+in\s+(?P<secs>[0-9.]+)\s+seconds\.\s+"
     r"(?P<pps>[0-9.]+)\s+PPS"
 )
+# Matches batch_pipeline summary: "\tIngestion only time: 70.51s / 0:01:10.515"
+INGEST_ONLY_TIME_RE = re.compile(r"Ingestion only time:\s*(?P<secs>[0-9.]+)s")
 PAGES_PER_SEC_RE = re.compile(r"Pages/sec \(ingest only; excludes Ray startup and recall\):\s*(?P<val>[0-9.]+)")
+# Matches batch_pipeline summary: "\tIngestion only PPS: 27.51"
+INGEST_ONLY_PPS_RE = re.compile(r"Ingestion only PPS:\s*(?P<val>[0-9.]+)")
 RECALL_RE = re.compile(r"(?P<metric>recall@\d+):\s*(?P<val>[0-9.]+)\s*$")
+
+# Header lines that introduce the recall metrics block.
+# The long form is printed by fused/inprocess pipelines; the short form by batch_pipeline.
+_RECALL_BLOCK_HEADERS = frozenset(
+    [
+        "Recall metrics (matching nemo_retriever.recall.core):",
+        "Recall metrics:",
+    ]
+)
 
 
 @dataclass
@@ -40,11 +53,19 @@ class StreamMetrics:
             self.ingest_secs = float(ingest_rows_match.group("secs"))
             self.rows_per_sec_ingest = float(ingest_rows_match.group("pps"))
 
+        ingest_time_match = INGEST_ONLY_TIME_RE.search(line)
+        if ingest_time_match:
+            self.ingest_secs = float(ingest_time_match.group("secs"))
+
         pps_match = PAGES_PER_SEC_RE.search(line)
         if pps_match:
             self.pages_per_sec_ingest = float(pps_match.group("val"))
 
-        if "Recall metrics (matching nemo_retriever.recall.core):" in line:
+        ingest_pps_match = INGEST_ONLY_PPS_RE.search(line)
+        if ingest_pps_match:
+            self.pages_per_sec_ingest = float(ingest_pps_match.group("val"))
+
+        if line.strip() in _RECALL_BLOCK_HEADERS:
             self._in_recall_block = True
             return
 
@@ -55,7 +76,7 @@ class StreamMetrics:
                 self.recall_metrics[metric] = float(recall_match.group("val"))
                 return
 
-            if line.strip() and not line.startswith(" "):
+            if line.strip() and not line.startswith(" ") and not line.startswith("\t"):
                 self._in_recall_block = False
 
 
