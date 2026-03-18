@@ -21,6 +21,7 @@ def _maybe_post_to_slack(
     replay_paths: list[Path] | None,
     slack_config: dict[str, object],
     skip_slack: bool,
+    webhook_url: str | None = None,
 ) -> bool:
     if skip_slack:
         typer.echo("Slack posting skipped (--skip-slack).")
@@ -29,13 +30,13 @@ def _maybe_post_to_slack(
         typer.echo("Slack posting disabled in nightly config.")
         return False
 
-    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
-    if not webhook_url:
+    effective_webhook_url = webhook_url or os.environ.get("SLACK_WEBHOOK_URL")
+    if not effective_webhook_url:
         typer.echo("Slack posting enabled but SLACK_WEBHOOK_URL is not set; skipping post.")
         return False
 
     report = load_replay_report(replay_paths or []) if replay_paths else load_session_report(report_path or Path("."))
-    post_report_to_slack(report, slack_config, webhook_url=webhook_url)
+    post_report_to_slack(report, slack_config, webhook_url=effective_webhook_url)
     typer.echo(f"Posted Slack summary for session `{report.session_name}`.")
     return True
 
@@ -56,6 +57,9 @@ def nightly_command(
             "Repeatable for run dirs."
         ),
     ),
+    slack_webhook_url: str | None = typer.Option(
+        None, "--slack-webhook-url", help="Slack webhook URL. Overrides SLACK_WEBHOOK_URL env var."
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print nightly run plan without executing."),
 ) -> None:
     normalized_tags = _normalize_tags(tag)
@@ -70,6 +74,7 @@ def nightly_command(
             replay_paths=list(replay),
             slack_config=slack_config,
             skip_slack=skip_slack,
+            webhook_url=slack_webhook_url,
         )
         raise typer.Exit(code=0)
 
@@ -114,6 +119,7 @@ def nightly_command(
             replay_paths=None,
             slack_config=slack_config,
             skip_slack=skip_slack,
+            webhook_url=slack_webhook_url,
         )
     except RuntimeError as exc:
         typer.echo(f"Slack post failed: {exc}")

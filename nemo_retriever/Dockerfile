@@ -11,6 +11,7 @@
 ARG BASE_IMG=nvcr.io/nvidia/base/ubuntu
 ARG BASE_IMG_TAG=jammy-20250619
 
+
 FROM $BASE_IMG:$BASE_IMG_TAG AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1-mesa-glx \
       libglib2.0-0 \
       wget \
+      git \
     && apt-get clean
 
 # ffmpeg/ffprobe for audio extraction (run before LibreOffice so apt state is consistent)
@@ -113,6 +115,8 @@ COPY src src
 COPY api api
 COPY client client
 
+
+
 # Editable install: at runtime, -v host_repo:/workspace overrides these dirs so dev changes apply.
 SHELL ["/bin/bash", "-c"]
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -120,5 +124,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/retriever_runtime/bin/activate \
     && uv pip install -e ./nemo_retriever
 
-# Default: run in-process pipeline (help if no args)
-CMD ["/bin/bash"]
+# Activate the venv, then run the entrypoint script.
+# Any arguments passed to `docker run` are forwarded to the Python script via "$@".
+# The trailing "--" sets $0 so that "$@" correctly captures $1, $2, …
+ENTRYPOINT ["/bin/bash", "-c", "source /opt/retriever_runtime/bin/activate && exec python ./nemo_retriever/docker_entrypoint.py \"$@\"", "--"]
+CMD [""]

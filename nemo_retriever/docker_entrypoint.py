@@ -10,8 +10,8 @@ Workflow:
   3. Generate a nightly_config for the requested DATASETS subset
   4. Run `retriever harness nightly`, which posts results to Slack automatically
 
-Required environment variables:
-  SLACK_WEBHOOK_URL   Slack incoming-webhook URL (harness reads this directly)
+Required (via CLI flag or environment variable):
+  SLACK_WEBHOOK_URL   Slack incoming-webhook URL (--slack-webhook-url takes precedence)
 
 Optional environment variables (shown with defaults):
   REPO_URL            https://github.com/NVIDIA/nv-ingest.git
@@ -35,6 +35,9 @@ Optional environment variables (shown with defaults):
                       no reinstall) and run steps 3 & 4 against the current
                       codebase. REPO_DIR / CLONE_DIR still determines where
                       the harness is imported from.
+  LOOP                false – set to "true" to repeat the full
+                      sync→install→harness cycle indefinitely.
+  LOOP_INTERVAL       0 – seconds to sleep between loop iterations.
   DATASET_DIR         (unset) – override the dataset directory for all runs;
                       forwarded to the harness as HARNESS_DATASET_DIR.
                       Example: DATASET_DIR=/raid/datasets/bo20
@@ -45,11 +48,14 @@ Optional environment variables (shown with defaults):
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -180,6 +186,7 @@ def run_harness(
     nemo_retriever_dir: str,
     config_path: str,
     skip_slack: bool,
+    slack_webhook_url: str,
     dataset_dir: str,
     query_csv: str,
 ) -> int:
@@ -234,6 +241,7 @@ def run_harness(
             replay_paths=None,
             slack_config=slack_config,
             skip_slack=skip_slack,
+            webhook_url=slack_webhook_url or None,
         )
     except RuntimeError as exc:
         log(f"Slack post failed: {exc}")
@@ -246,22 +254,182 @@ def run_harness(
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="nemo_retriever CI harness entrypoint",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # ── repo / git ────────────────────────────────────────────────────────
+    p.add_argument("--repo-url", default=None, metavar="URL", help="Git remote URL to clone/pull  [env: REPO_URL]")
+    p.add_argument("--repo-branch", default=None, metavar="BRANCH", help="Branch to sync  [env: REPO_BRANCH]")
+    p.add_argument("--repo-dir", default=None, metavar="PATH", help="Local path for the in-place pull  [env: REPO_DIR]")
+    p.add_argument(
+        "--clone-dir",
+        default=None,
+        metavar="PATH",
+        help="Clone repo here fresh (leaves --repo-dir untouched)  [env: CLONE_DIR]",
+    )
+    p.add_argument("--git-token", default=None, metavar="TOKEN", help="PAT for private forks  [env: GIT_TOKEN]")
+
+    # ── harness ───────────────────────────────────────────────────────────
+    p.add_argument(
+        "--datasets", default=None, metavar="LIST", help="Comma-separated dataset keys, e.g. jp20,bo20  [env: DATASETS]"
+    )
+    p.add_argument("--preset", default=None, metavar="PRESET", help="Preset name, e.g. single_gpu  [env: PRESET]")
+    p.add_argument(
+        "--slack-title", default=None, metavar="TITLE", help="Title shown in the Slack post  [env: SLACK_TITLE]"
+    )
+    p.add_argument(
+        "--slack-webhook-url",
+        default=None,
+        metavar="URL",
+        help="Slack webhook URL. Overrides SLACK_WEBHOOK_URL env var  [env: SLACK_WEBHOOK_URL]",
+    )
+    p.add_argument(
+        "--dataset-dir",
+        default=None,
+        metavar="PATH",
+        help="Override dataset directory (HARNESS_DATASET_DIR)  [env: DATASET_DIR]",
+    )
+    p.add_argument(
+        "--query-csv",
+        default=None,
+        metavar="PATH",
+        help="Override query CSV path (HARNESS_QUERY_CSV)  [env: QUERY_CSV]",
+    )
+
+    # ── flags ─────────────────────────────────────────────────────────────
+    p.add_argument(
+        "--skip-slack", action="store_true", default=None, help="Suppress Slack posting  [env: SKIP_SLACK=true]"
+    )
+    p.add_argument(
+        "--install-deps",
+        action="store_true",
+        default=None,
+        help="Upgrade transitive deps on reinstall  [env: INSTALL_DEPS=true]",
+    )
+    p.add_argument(
+        "--harness-only",
+        action="store_true",
+        default=None,
+        help="Skip steps 1 & 2; run steps 3 & 4 against current codebase  [env: HARNESS_ONLY=true]",
+    )
+    p.add_argument(
+        "--loop",
+        action="store_true",
+        default=None,
+        help="Run indefinitely, repeating sync→install→harness  [env: LOOP=true]",
+    )
+    p.add_argument(
+        "--loop-interval",
+        default=None,
+        type=int,
+        metavar="SECS",
+        help="Seconds to sleep between loop iterations  [env: LOOP_INTERVAL, default: 0]",
+    )
+
+    return p.parse_args()
+
+
+def _resolve(arg_val, env_key: str, default: str) -> str:
+    """Return first non-None value in priority order: CLI arg → env var → default."""
+    if arg_val is not None:
+        return str(arg_val)
+    return os.environ.get(env_key) or default
+
+
+def _resolve_bool(arg_val, env_key: str) -> bool:
+    if arg_val:  # store_true sets True when flag is present
+        return True
+    return os.environ.get(env_key, "false").lower() == "true"
+
+
 def main() -> None:
-    repo_url = os.environ.get("REPO_URL", "https://github.com/NVIDIA/nv-ingest.git")
-    repo_branch = os.environ.get("REPO_BRANCH", "main")
-    repo_dir = os.environ.get("REPO_DIR", "/raid/nv-ingest")
-    clone_dir = os.environ.get("CLONE_DIR", "")
-    git_token = os.environ.get("GIT_TOKEN", "")
+    args = _parse_args()
 
-    datasets = os.environ.get("DATASETS", "jp20,bo20")
-    preset = os.environ.get("PRESET", "single_gpu")
-    skip_slack = os.environ.get("SKIP_SLACK", "false").lower() == "true"
-    slack_title = os.environ.get("SLACK_TITLE", "nemo_retriever CI Harness")
+    repo_url = _resolve(args.repo_url, "REPO_URL", "https://github.com/NVIDIA/nv-ingest.git")
+    repo_branch = _resolve(args.repo_branch, "REPO_BRANCH", "main")
+    repo_dir = _resolve(args.repo_dir, "REPO_DIR", "/raid/nv-ingest")
+    clone_dir = _resolve(args.clone_dir, "CLONE_DIR", "")
+    git_token = _resolve(args.git_token, "GIT_TOKEN", "")
 
-    install_deps = os.environ.get("INSTALL_DEPS", "false").lower() == "true"
-    harness_only = os.environ.get("HARNESS_ONLY", "false").lower() == "true"
-    dataset_dir = os.environ.get("DATASET_DIR", "")
-    query_csv = os.environ.get("QUERY_CSV", "")
+    datasets = _resolve(args.datasets, "DATASETS", "jp20,bo20")
+    preset = _resolve(args.preset, "PRESET", "single_gpu")
+    slack_title = _resolve(args.slack_title, "SLACK_TITLE", "nemo_retriever CI Harness")
+    slack_webhook_url = _resolve(args.slack_webhook_url, "SLACK_WEBHOOK_URL", "")
+    dataset_dir = _resolve(args.dataset_dir, "DATASET_DIR", "")
+    query_csv = _resolve(args.query_csv, "QUERY_CSV", "")
+
+    skip_slack = _resolve_bool(args.skip_slack, "SKIP_SLACK")
+    install_deps = _resolve_bool(args.install_deps, "INSTALL_DEPS")
+    harness_only = _resolve_bool(args.harness_only, "HARNESS_ONLY")
+    loop = _resolve_bool(args.loop, "LOOP")
+    loop_interval = int(_resolve(args.loop_interval, "LOOP_INTERVAL", "0"))
+
+    # Graceful shutdown on SIGINT / SIGTERM so the loop exits cleanly.
+    _shutdown = False
+
+    def _handle_signal(signum, _frame):
+        nonlocal _shutdown
+        log(f"Caught signal {signal.Signals(signum).name} – finishing current iteration then exiting")
+        _shutdown = True
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    iteration = 0
+
+    while True:
+        iteration += 1
+        if loop:
+            log(f"=== Loop iteration {iteration} ===")
+
+        _run_iteration(
+            harness_only=harness_only,
+            repo_url=repo_url,
+            repo_branch=repo_branch,
+            repo_dir=repo_dir,
+            clone_dir=clone_dir,
+            git_token=git_token,
+            install_deps=install_deps,
+            datasets=datasets,
+            preset=preset,
+            slack_title=slack_title,
+            skip_slack=skip_slack,
+            slack_webhook_url=slack_webhook_url,
+            dataset_dir=dataset_dir,
+            query_csv=query_csv,
+        )
+
+        if not loop or _shutdown:
+            break
+
+        if loop_interval > 0:
+            log(f"Sleeping {loop_interval}s before next iteration...")
+            time.sleep(loop_interval)
+
+    log("=== Harness finished ===")
+
+
+def _run_iteration(
+    *,
+    harness_only: bool,
+    repo_url: str,
+    repo_branch: str,
+    repo_dir: str,
+    clone_dir: str,
+    git_token: str,
+    install_deps: bool,
+    datasets: str,
+    preset: str,
+    slack_title: str,
+    skip_slack: bool,
+    slack_webhook_url: str,
+    dataset_dir: str,
+    query_csv: str,
+) -> int:
+    """Execute one full sync → install → config → harness cycle. Returns exit code."""
 
     if harness_only:
         log("=== HARNESS_ONLY=true – skipping steps 1 & 2 ===")
@@ -302,14 +470,14 @@ def main() -> None:
             nemo_retriever_dir=nemo_retriever_dir,
             config_path=config_path,
             skip_slack=skip_slack,
+            slack_webhook_url=slack_webhook_url,
             dataset_dir=dataset_dir,
             query_csv=query_csv,
         )
     finally:
         Path(config_path).unlink(missing_ok=True)
 
-    log("=== Harness finished ===")
-    sys.exit(rc)
+    return rc
 
 
 if __name__ == "__main__":
