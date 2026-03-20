@@ -234,6 +234,7 @@ def run_harness(
     log(f"Nightly session: {session_dir}")
     log(f"Session summary: {summary_path}")
 
+    os.environ["SLACK_WEBHOOK_URL"] = slack_webhook_url or os.environ.get("SLACK_WEBHOOK_URL", "")
     slack_failed = False
     try:
         _maybe_post_to_slack(
@@ -241,7 +242,6 @@ def run_harness(
             replay_paths=None,
             slack_config=slack_config,
             skip_slack=skip_slack,
-            webhook_url=slack_webhook_url or None,
         )
     except RuntimeError as exc:
         log(f"Slack post failed: {exc}")

@@ -113,13 +113,13 @@ def nightly_command(
     typer.echo(f"\nNightly session: {session_dir}")
     typer.echo(f"Session summary: {summary_path}")
     slack_failed = False
+    os.environ["SLACK_WEBHOOK_URL"] = slack_webhook_url or os.environ.get("SLACK_WEBHOOK_URL", "")
     try:
         _maybe_post_to_slack(
             report_path=summary_path,
             replay_paths=None,
             slack_config=slack_config,
             skip_slack=skip_slack,
-            webhook_url=slack_webhook_url,
         )
     except RuntimeError as exc:
         typer.echo(f"Slack post failed: {exc}")
