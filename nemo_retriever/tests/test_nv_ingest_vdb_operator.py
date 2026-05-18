@@ -17,6 +17,7 @@ class FakeVDB(VDB):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.run_calls: list[Any] = []
+        self.sink_calls: list[tuple[Any, dict[str, Any]]] = []
         self.retrieval_calls: list[tuple[Any, dict[str, Any]]] = []
 
     def create_index(self, **kwargs: Any) -> None:
@@ -47,6 +48,9 @@ class FakeVDB(VDB):
         self.run_calls.append(records)
         return {"records": records}
 
+    def sink(self, records: Any, **kwargs: Any) -> None:
+        self.sink_calls.append((records, dict(kwargs)))
+
 
 def _graph_rows() -> list[dict[str, Any]]:
     return [
@@ -67,17 +71,24 @@ def _graph_rows() -> list[dict[str, Any]]:
     ]
 
 
-def test_process_returns_original_graph_rows_and_delegates_converted_records_to_run() -> None:
+def test_process_is_passthrough_and_sink_delegates_converted_records_to_vdb_sink() -> None:
     data = _graph_rows()
     vdb = FakeVDB()
     operator = IngestVdbOperator(vdb=vdb)
 
+    # preprocess/process/postprocess are pure pass-throughs.
     assert operator.preprocess(data) is data
     assert operator.process(data) is data
     assert operator.postprocess(data) is data
-    assert vdb.run_calls[0][0][0]["document_type"] == "text"
-    assert vdb.run_calls[0][0][0]["metadata"]["content"] == "first chunk"
-    assert vdb.run_calls[0][0][0]["metadata"]["embedding"] == [0.1] * 2048
+    assert vdb.run_calls == []
+    assert vdb.sink_calls == []
+
+    # sink converts and delegates to VDB.sink.
+    operator.sink(data)
+    converted_records, _kwargs = vdb.sink_calls[0]
+    assert converted_records[0][0]["document_type"] == "text"
+    assert converted_records[0][0]["metadata"]["content"] == "first chunk"
+    assert converted_records[0][0]["metadata"]["embedding"] == [0.1] * 2048
 
 
 def test_vdb_op_constructs_client_vdb(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,24 +123,28 @@ def test_ingest_operator_converts_graph_rows_to_client_vdb_records() -> None:
         }
     ]
 
+    # Graph execution is a pure pass-through; no VDB work happens here.
     assert operator(data) is data
+    assert vdb.run_calls == []
+    assert vdb.sink_calls == []
 
-    assert vdb.run_calls == [
+    # sink does the conversion and delegates to VDB.sink.
+    operator.sink(data)
+    converted_records, _kwargs = vdb.sink_calls[0]
+    assert converted_records == [
         [
-            [
-                {
-                    "document_type": "text",
-                    "metadata": {
-                        "embedding": [0.1] * 2048,
-                        "content": "graph chunk",
-                        "content_metadata": {"page_number": 7},
-                        "source_metadata": {
-                            "source_id": "/tmp/doc-a.pdf",
-                            "source_name": "doc-a.pdf",
-                        },
+            {
+                "document_type": "text",
+                "metadata": {
+                    "embedding": [0.1] * 2048,
+                    "content": "graph chunk",
+                    "content_metadata": {"page_number": 7},
+                    "source_metadata": {
+                        "source_id": "/tmp/doc-a.pdf",
+                        "source_name": "doc-a.pdf",
                     },
-                }
-            ]
+                },
+            }
         ]
     ]
 

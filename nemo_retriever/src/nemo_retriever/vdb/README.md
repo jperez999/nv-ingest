@@ -25,14 +25,9 @@ Flow (see `operators.py` and `records.py`):
 
 Graph ingestion with `run_mode=batch` uses **`RayDataExecutor`** (`nemo_retriever/graph/executor.py`), which walks the linear graph and, for each node, appends a Ray Data **`map_batches`** stage.
 
-`IngestVdbOperator` declares **`REQUIRES_GLOBAL_BATCH = True`**. When the executor sees that flag on a node’s operator class it:
+`IngestVdbOperator` inherits the **`GraphSink`** mixin (`nemo_retriever/graph/graph_sink.py`). The executor invokes `IngestVdbOperator.sink(final_df, **kwargs)` **on the driver**, after `ds.to_pandas()` has materialized the full dataset. The post-graph write (e.g. `LanceDB.sink` → `write_to_index`) therefore runs **once** against the complete output. Per-batch `process()` calls during graph execution still run on workers and forward records to `VDB.run` for index/table creation, but the final indexing step is the `sink` callback — no Ray Data repartition is required around the operator.
 
-1. **Repartitions the dataset immediately before that stage** so the upstream `Dataset` is coalesced for this operator — by default **`ds.repartition(num_blocks=1)`**, i.e. a **single Ray Data block** holding **all rows** (the same pattern used for other global operators such as `AudioVisualFuser` and `VideoFrameTextDedup`). If the class instead defines **`GLOBAL_BATCH_GROUP_KEYS`** and **`concurrency > 1`**, the executor may repartition by those keys with multiple blocks; `IngestVdbOperator` does **not** use that path, so it always gets **one block**.
-2. Sets **`batch_size=None`** for that `map_batches` call so Ray passes the **entire block** as **one pandas batch** to the operator.
-
-Together, repartition + full batch mean **`process()`** receives **every row at once**, **`to_client_vdb_records`** builds one combined batch list, and **`VDB.run(records)`** runs **once** over the full ingest output — matching the historical “post-graph, single upload” behavior while keeping upload **inside** the graph.
-
-**In-process** execution (`InprocessExecutor`) does not use Ray Data; it already runs each operator on the **whole** `DataFrame`, so no repartition step is needed.
+**In-process** execution (`InprocessExecutor`) does not use Ray Data; it runs each operator on the **whole** `DataFrame` and then invokes any `GraphSink` operators' `sink` method against the final DataFrame.
 
 ### Wiring ingestion today
 

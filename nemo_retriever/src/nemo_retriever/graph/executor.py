@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from nemo_retriever.graph.gpu_operator import GPUOperator
+from nemo_retriever.graph.graph_sink import GraphSink
 from nemo_retriever.graph.pipeline_graph import Graph, Node
 from nemo_retriever.graph.operator_resolution import resolve_graph
 from nemo_retriever.utils.hf_cache import collect_hf_runtime_env
@@ -137,6 +138,10 @@ class InprocessExecutor(AbstractExecutor):
         else:
             for _name, op in operators:
                 df = op.run(df)
+
+        for _name, op in operators:
+            if isinstance(op, GraphSink):
+                op.sink(df, **kwargs)
 
         return df
 
@@ -273,6 +278,7 @@ class RayDataExecutor(AbstractExecutor):
             except FileNotFoundError as exc:
                 raise_input_path_not_found(input_paths or [], exc)
         nodes = self._linearize(resolved_graph)
+        sink_nodes: List[Node] = [n for n in nodes if issubclass(n.operator_class, GraphSink)]
         for node in nodes:
             overrides = dict(self._node_overrides.get(node.name, {}))
             target_num_rows_per_block = overrides.pop("target_num_rows_per_block", None)
@@ -380,4 +386,10 @@ class RayDataExecutor(AbstractExecutor):
                 **overrides,
             )
 
-        return ds.to_pandas()
+        result_df = ds.to_pandas()
+
+        for node in sink_nodes:
+            sink_op = node.operator_class(**node.operator_kwargs)
+            sink_op.sink(result_df, **kwargs)
+
+        return result_df

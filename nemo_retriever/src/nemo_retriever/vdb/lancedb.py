@@ -313,7 +313,7 @@ class LanceDB(VDB):
     def __init__(
         self,
         uri: str | None = None,
-        overwrite: bool = True,
+        overwrite: bool = False,
         table_name: str = "nv-ingest",
         index_type: str = "IVF_HNSW_SQ",
         metric: str = "l2",
@@ -351,9 +351,45 @@ class LanceDB(VDB):
         self.fill_value = float(fill_value)
         self.validate_vector_length = bool(validate_vector_length)
         super().__init__(**kwargs)
+        schema = pa.schema(
+            [
+                pa.field("vector", pa.list_(pa.float32(), self.vector_dim)),
+                pa.field("text", pa.string()),
+                pa.field("metadata", pa.string()),
+                pa.field("source", pa.string()),
+            ]
+        )
+        create_kwargs: dict[str, Any] = {
+            "schema": schema,
+            # "mode": "overwrite" if self.overwrite else "create",
+            "on_bad_vectors": self.on_bad_vectors,
+        }
+        if self.on_bad_vectors == "fill":
+            create_kwargs["fill_value"] = self.fill_value
 
-    def create_index(self, records=None, table_name: str = "nv-ingest", **kwargs):
-        """Create or update a LanceDB table and populate it with transformed records.
+        create_kwargs: dict[str, Any] = {
+            "schema": schema,
+            **create_kwargs,
+        }
+        connect_start = time.perf_counter()
+        db = lancedb.connect(uri=self.uri)
+        _record_timing("lancedb.connect", time.perf_counter() - connect_start)
+        try:
+            table = db.open_table(table_name)
+        except Exception:
+            table = None
+        if table and self.overwrite:
+            db.drop_table(table_name)
+        if table is None:
+            table = db.create_table(table_name, exist_ok=True, **create_kwargs)
+        self.table = table
+
+    def write_to_index(self, records, **kwargs):
+        """Stream a batch of NV-Ingest records into the LanceDB table.
+
+        Called per-batch from :meth:`run` during graph execution. The table is
+        created in :meth:`__init__`, so this method only validates rows and
+        appends them via ``table.add``.
 
         Validates per-row vector shape (when ``validate_vector_length`` is set
         on the instance and ``on_bad_vectors`` is not ``"error"``) and forwards
@@ -361,102 +397,41 @@ class LanceDB(VDB):
         rows escaping the row-builder check are still handled by the LanceDB
         writer instead of aborting the run. When ``on_bad_vectors == "error"``
         the wrapper deliberately skips its own length check so that LanceDB
-        itself raises on the bad row, matching the documented strict-fail
-        semantics of that policy.
+        itself raises on the bad row.
         """
-        connect_start = time.perf_counter()
-        db = lancedb.connect(uri=self.uri)
-        _record_timing("lancedb.connect", time.perf_counter() - connect_start)
-
         if self.validate_vector_length and self.on_bad_vectors != "error":
             expected_dim: int | None = self.vector_dim
         else:
             expected_dim = None
 
         results, counts = _create_lancedb_results(records or [], expected_dim=expected_dim)
-        schema = _lancedb_arrow_schema(self.vector_dim)
+        if not results:
+            return results
 
-        write_kwargs: dict[str, Any] = {
-            "on_bad_vectors": self.on_bad_vectors,
-        }
-        if self.on_bad_vectors == "fill":
-            write_kwargs["fill_value"] = self.fill_value
-
-        create_kwargs: dict[str, Any] = {
-            "schema": schema,
-            **write_kwargs,
-        }
-
-        create_start = time.perf_counter()
-
-        if self.overwrite:
-            table = db.create_table(
-                table_name,
-                data=results,
-                mode="overwrite",
-                **create_kwargs,
-            )
-            event = "lancedb.create_table"
-        else:
-            try:
-                table = db.open_table(table_name)
-            except ValueError as exc:
-                if not _is_missing_lancedb_table_error(exc):
-                    raise
-                table = db.create_table(
-                    table_name,
-                    data=results,
-                    mode="create",
-                    **create_kwargs,
-                )
-                event = "lancedb.create_table"
-            else:
-                _validate_append_schema(table, schema, table_name=table_name, uri=self.uri)
-                if results:
-                    existing_rows = int(table.count_rows())
-                    logger.warning(
-                        "Appending %d row(s) to existing LanceDB table %r at %s "
-                        "(existing_rows=%d). Append mode does not deduplicate; rerunning the same inputs "
-                        "will duplicate rows.",
-                        len(results),
-                        table_name,
-                        self.uri,
-                        existing_rows,
-                    )
-                    table.add(
-                        results,
-                        mode="append",
-                        **write_kwargs,
-                    )
-                event = "lancedb.add_rows"
-
+        add_start = time.perf_counter()
+        self.table.add(results)
         _record_timing(
-            event,
-            time.perf_counter() - create_start,
+            "lancedb.add_results",
+            time.perf_counter() - add_start,
             {"rows": len(results), **counts},
         )
-        return table
+        return results
 
-    def write_to_index(
-        self,
-        records,
-        table=None,
-        index_type="IVF_HNSW_SQ",
-        metric="l2",
-        num_partitions=16,
-        num_sub_vectors=256,
-        hybrid: bool = None,
-        fts_language: str = None,
-        **kwargs,
-    ):
-        """Create vector and optionally FTS indexes on the LanceDB table.
+    def create_index(self, **kwargs):
+        """Build vector and optional FTS indexes over the populated table.
 
+        Invoked from :meth:`sink` after all records have been streamed in.
         For IVF index types, ``num_partitions`` is clamped so that
         ``num_partitions < row_count`` (Lance K-means requirement). Empty or
         single-row tables skip the vector index; hybrid FTS may still be built.
         """
-        hybrid = hybrid if hybrid is not None else self.hybrid
-        fts_language = fts_language or self.fts_language
+        table = self.table
+        index_type = kwargs.get("index_type", self.index_type)
+        metric = kwargs.get("metric", self.metric)
+        num_partitions = kwargs.get("num_partitions", self.num_partitions)
+        num_sub_vectors = kwargs.get("num_sub_vectors", self.num_sub_vectors)
+        hybrid = kwargs.get("hybrid", self.hybrid)
+        fts_language = kwargs.get("fts_language", self.fts_language)
 
         num_rows = int(table.count_rows())
         requested_partitions = int(num_partitions)
@@ -512,22 +487,23 @@ class LanceDB(VDB):
             _record_timing("lancedb.fts_index_ready", time.perf_counter() - fts_index_start)
 
     def run(self, records):
-        """Orchestrate index creation and data ingestion."""
-        table = self.create_index(records=records, table_name=self.table_name)
-        if self.build_index:
-            self.write_to_index(
-                records,
-                table=table,
-                index_type=self.index_type,
-                metric=self.metric,
-                num_partitions=self.num_partitions,
-                num_sub_vectors=self.num_sub_vectors,
-                hybrid=self.hybrid,
-                fts_language=self.fts_language,
-            )
-        else:
-            logger.info("Skipping LanceDB index creation for table %r because build_index=False.", self.table_name)
+        """Standalone entry point: stream records and build the index.
+
+        Used by direct API callers that drive a one-shot ingest outside the
+        graph. The graph pipeline does the same work via :meth:`sink` after
+        execution completes.
+        """
+        self.sink(records)
         return records
+
+    def sink(self, records, **kwargs):
+        """Stream records into the table, then build the secondary index.
+
+        Invoked once on the driver by the graph executor after graph
+        execution completes (via :class:`IngestVdbOperator.sink`).
+        """
+        self.write_to_index(records)
+        self.create_index()
 
     def retrieval(self, vectors, **kwargs):
         """Search LanceDB with precomputed query vectors.

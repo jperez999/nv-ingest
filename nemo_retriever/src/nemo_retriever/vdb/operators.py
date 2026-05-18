@@ -14,6 +14,7 @@ from nemo_retriever.vdb.adt_vdb import VDB
 from nemo_retriever.vdb.factory import get_vdb_op_cls
 
 from nemo_retriever.graph.abstract_operator import AbstractOperator
+from nemo_retriever.graph.graph_sink import GraphSink
 from nemo_retriever.vdb.records import normalize_retrieval_results, to_client_vdb_records
 from nemo_retriever.vdb.sidecar_metadata import (
     apply_sidecar_metadata_to_client_batches,
@@ -83,12 +84,13 @@ def query_vectors_from_embedded_dataframe(df: pd.DataFrame) -> list[list[float]]
     return vectors
 
 
-class IngestVdbOperator(AbstractOperator):
-    """Upload already-embedded graph output through an nv-ingest-client VDB."""
+class IngestVdbOperator(AbstractOperator, GraphSink):
+    """Upload already-embedded graph output through an nv-ingest-client VDB.
 
-    #: Ray batch mode: repartition to one block and one ``map_batches`` call so
-    #: ``VDB.run`` sees the full dataset once (matches historical post-graph upload).
-    REQUIRES_GLOBAL_BATCH: bool = True
+    Inherits :class:`GraphSink` so the executor will invoke :meth:`sink`
+    after graph execution completes, delegating the post-graph write to the
+    underlying VDB's ``sink`` method.
+    """
 
     def __init__(
         self,
@@ -116,22 +118,30 @@ class IngestVdbOperator(AbstractOperator):
         return data
 
     def process(self, data: Any, **kwargs: Any) -> Any:
-        # Compatibility shim: graph_pipeline emits flat embedded rows, while
-        # nv-ingest-client VDB.run still expects nested NV-Ingest records.
-        records = to_client_vdb_records(data)
-        if self._sidecar_spec is not None and self._sidecar_lookup is not None:
-            records = apply_sidecar_metadata_to_client_batches(
-                records,
-                lookup=self._sidecar_lookup,
-                meta_fields=self._sidecar_spec["meta_fields"],
-                join_key=self._sidecar_spec["meta_join_key"],
-            )
-        if records and any(batch for batch in records):
-            self._vdb.run(records)
+        # Per-batch step is a pass-through; the entire VDB write (record
+        # conversion + sidecar merge + table.add + index build) is deferred to
+        # `sink`, which runs once on the driver against the final dataset.
         return data
 
     def postprocess(self, data: Any, **kwargs: Any) -> Any:
         return data
+
+    def sink(self, records: Any, **kwargs: Any) -> None:
+        """Run the entire VDB write against the final dataset.
+
+        Converts graph rows to NV-Ingest client VDB records, merges sidecar
+        metadata (when configured), and delegates to the underlying VDB's
+        ``sink`` for the actual streaming + secondary-index build.
+        """
+        converted = to_client_vdb_records(records)
+        if self._sidecar_spec is not None and self._sidecar_lookup is not None:
+            converted = apply_sidecar_metadata_to_client_batches(
+                converted,
+                lookup=self._sidecar_lookup,
+                meta_fields=self._sidecar_spec["meta_fields"],
+                join_key=self._sidecar_spec["meta_join_key"],
+            )
+        self._vdb.sink(converted, **kwargs)
 
 
 class RetrieveVdbOperator(AbstractOperator):

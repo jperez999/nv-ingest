@@ -25,6 +25,7 @@ class _FakeVDB:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.run_calls: list[Any] = []
+        self.sink_calls: list[tuple[Any, dict[str, Any]]] = []
 
     def create_index(self, **kwargs: Any) -> None:
         return None
@@ -37,6 +38,9 @@ class _FakeVDB:
 
     def run(self, records: Any) -> None:
         self.run_calls.append(records)
+
+    def sink(self, records: Any, **kwargs: Any) -> None:
+        self.sink_calls.append((records, dict(kwargs)))
 
 
 def test_normalize_sidecar_cell_value_list_and_dict_no_raise() -> None:
@@ -104,8 +108,11 @@ def test_apply_sidecar_merges_into_content_metadata(tmp_path: Path) -> None:
     assert cm["type"] == "text"
 
 
-def test_ingest_vdb_operator_marks_global_batch_for_ray() -> None:
-    assert IngestVdbOperator.REQUIRES_GLOBAL_BATCH is True
+def test_ingest_vdb_operator_does_not_require_global_batch() -> None:
+    # IngestVdbOperator no longer forces Ray to repartition into a single
+    # block: the post-graph write now happens via the GraphSink mixin on the
+    # driver, so per-batch `process` calls are fine.
+    assert not getattr(IngestVdbOperator, "REQUIRES_GLOBAL_BATCH", False)
 
 
 def test_vdb_upload_params_triplet_validation() -> None:
@@ -155,10 +162,10 @@ def test_ingest_operator_passes_merged_records_to_vdb(tmp_path: Path, monkeypatc
             "metadata": {"content_metadata": {"type": "text"}},
         }
     ]
-    operator.process(data)
+    operator.sink(data)
     vdb = operator._vdb
-    assert vdb.run_calls
-    rec = vdb.run_calls[0][0][0]
+    assert vdb.sink_calls
+    rec = vdb.sink_calls[0][0][0][0]
     assert rec["metadata"]["content_metadata"].get("meta_a") == "zeta"
 
 

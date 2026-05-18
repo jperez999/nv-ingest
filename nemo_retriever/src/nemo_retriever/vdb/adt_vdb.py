@@ -218,6 +218,27 @@ class VDB(ABC):
         """
         pass
 
+    def sink(self, records, **kwargs):
+        """Post-graph sink hook for vector database operators.
+
+        Invoked by the executor after graph execution completes when the
+        owning operator inherits :class:`GraphSink`. Default implementation
+        is a no-op so existing VDB subclasses remain backwards-compatible.
+        Concrete implementations should override this to perform any work
+        that must happen *after* all records have been written (for example,
+        building secondary indexes such as IVF or FTS).
+
+        Parameters:
+        - records: records the operator handed to the sink (format follows
+            repository conventions; may be unused if the sink only operates
+            on the table created during ``run``).
+        - **kwargs: keyword arguments forwarded from ``executor.ingest``.
+
+        Returns:
+        - implementation-specific result; typically ``None``.
+        """
+        return None
+
     def reindex(self, records: list, **kwargs):
         """Optional helper to rebuild or re-populate indexes with new data.
 
