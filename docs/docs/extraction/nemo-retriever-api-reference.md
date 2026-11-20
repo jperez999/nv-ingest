@@ -232,6 +232,13 @@ those tensors on the GPU, and OCR consumes GPU crops. Page RGB does not return
 to host memory or pass through JPEG/base64 encoding. Text, region coordinates,
 and model results still use CPU processing where required.
 
+For GPU-resident Page Elements inputs, compatible 8-image inference batches
+reuse cached decoding-grid geometry and a captured CUDA Graph backbone.
+Partial batches and different input signatures use eager GPU execution without
+CPU image fallback. Weights, detection thresholds, and postprocessing remain
+unchanged, and graph replay returns independent output storage. This internal
+execution path adds no configuration option or throughput guarantee.
+
 For compatible GPU prediction tensors, Page Elements packs boxes, labels, and
 scores into one metadata readback per inference batch. Existing CPU
 postprocessing and detection thresholds remain unchanged. This transfers

@@ -169,6 +169,33 @@ class NemotronPageElementsV3(HuggingFaceModel):
 
         return boxes_list, labels_list, scores_list
 
+    @nvtx.annotate("nrl.model::page_elements.invoke", color="blue")
+    def _invoke_cuda(self, input_data, orig_shape):
+        """Use a graphable backbone for the native GPU-resident input path."""
+        if self._model is None:
+            raise RuntimeError("Local page_elements_v3 model was not initialized.")
+        if not hasattr(self, "_cuda_model"):
+            from nemo_retriever.models.local.page_elements_cuda import make_cuda_detector
+
+            self._cuda_model = make_cuda_detector(self._model)
+        # Keep the wrapper's current detection options, including any overrides.
+        for name in (
+            "device",
+            "img_size",
+            "min_bbox_size",
+            "normalize_boxes",
+            "conf_thresh",
+            "iou_thresh",
+            "class_agnostic",
+            "thresholds_per_class",
+            "labels",
+            "num_classes",
+        ):
+            if hasattr(self._model, name):
+                setattr(self._cuda_model, name, getattr(self._model, name))
+        with torch.inference_mode(), torch.autocast(device_type="cuda"):
+            return self._cuda_model(input_data, orig_shape)
+
     def _postprocess_cuda(self, preds):
         """Batch prediction metadata readback for GPU-resident image inputs."""
         from nemo_retriever.common.modality.page_elements.gpu_metadata import prediction_batch_to_cpu

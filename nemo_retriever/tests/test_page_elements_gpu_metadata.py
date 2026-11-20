@@ -106,6 +106,10 @@ def test_extraction_selects_specialized_postprocess_only_for_supported_gpu_input
             return tuple([page[key] for page in predictions] for key in ("boxes", "labels", "scores"))
 
     class SpecializedModel(Model):
+        def _invoke_cuda(self, batch, shapes):
+            calls.append("invoke_cuda")
+            return super().__call__(batch, shapes)
+
         def _postprocess_cuda(self, predictions):
             calls.append("cuda")
             return super().postprocess(predictions)
@@ -122,4 +126,4 @@ def test_extraction_selects_specialized_postprocess_only_for_supported_gpu_input
         page_image = {"image_b64": "placeholder"}
     result = shared.detect_page_elements_v3(pd.DataFrame({"page_image": [page_image]}), model=model)
     assert result.iloc[0]["page_elements_v3"]["error"] is None
-    assert calls == (["cuda", "public"] if gpu_input and specialized else ["public"])
+    assert calls == (["invoke_cuda", "cuda", "public"] if gpu_input and specialized else ["public"])
