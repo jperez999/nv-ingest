@@ -250,6 +250,14 @@ Refer to
 [Reuse registered GPU RGB buffers](performance_guide.md#reuse-registered-gpu-rgb-buffers)
 for sizing, allocation behavior, and validation limits.
 
+Set `CUDA_PDF_COST_AWARE_SCHEDULING=1` in the NRL driver environment to
+select renderer producers by pending encoded scene bytes on the same node.
+Unset or `0` retains round-robin dispatch. Only `0` and `1` are accepted;
+invalid values fail driver setup. Scene bytes estimate queued work, not GPU
+execution time. Refer to
+[Balance pending renderer work](performance_guide.md#balance-pending-renderer-work)
+for accounting and validation limits.
+
 The supported configuration has the following restrictions:
 
 - Use PDF inputs and the native Ray batch executor. In-process, service,

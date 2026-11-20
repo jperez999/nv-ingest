@@ -313,6 +313,37 @@ The encoded renderers and GPU-resident mode present different model pixels
 because the latter avoids JPEG compression. Compare extracted outputs and
 retrieval accuracy before accepting a throughput result.
 
+### Balance pending renderer work
+
+Native `cuda_rdt` ingestion can select renderer producers by pending work
+instead of round-robin dispatch. Set `CUDA_PDF_COST_AWARE_SCHEDULING=1` in
+the NRL driver environment before ingestion. Unset or `0` retains the existing
+round-robin policy. The driver accepts only `0` or `1`; other values fail setup.
+This option does not apply to the default PDFium or encoded CUDA renderer.
+
+For each batch, the enabled policy selects a registered producer on the same
+node with the lowest total pending encoded scene bytes. It reserves the
+batch's scene bytes while its rendering request is outstanding, then releases
+that reservation when the request completes or raises an error. Shared-scene
+owners remain alive through replay, as on the existing GPU path.
+
+Encoded scene size is a workload proxy. It measures recorded drawing commands
+and resources, not observed GPU time, remaining kernel work, or RGB image size.
+The policy can assign different batches to producers without partitioning the
+corpus or changing model actor counts, index settings, or image transport.
+RGB pixels remain on the GPU.
+
+With this option enabled, final renderer audit records include
+`dispatch_policy="pending_scene_bytes"` and per-producer `dispatch` counters:
+`dispatched_batches`, `dispatched_scene_bytes`, `pending_batches`,
+`pending_scene_bytes`, and `peak_pending_scene_bytes`. Compare these counters
+with stage timings and complete ingestion throughput when evaluating balance.
+No counter alone establishes GPU utilization or a performance improvement.
+
+Full-corpus correctness, retrieval, and performance validation of this
+scheduling policy remain pending. Earlier DC10K snapshots do not establish
+its accuracy or throughput.
+
 ### Reuse registered GPU RGB buffers
 
 For `cuda_rdt`, the following independent settings reserve reusable RGB

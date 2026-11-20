@@ -31,6 +31,15 @@ def _rgb_pool_capacity(name="CUDA_PDF_RGB_POOL_BYTES"):
     return value
 
 
+def _cost_aware_scheduling_enabled():
+    import os
+
+    value = os.environ.get("CUDA_PDF_COST_AWARE_SCHEDULING", "0")
+    if value not in ("0", "1"):
+        raise ValueError("CUDA_PDF_COST_AWARE_SCHEDULING must be 0 or 1")
+    return value == "1"
+
+
 def _receive_pool(capacity):
     import torch
     from cuda_pdf_renderer.buffer_pool import DeviceRgbPool
@@ -237,11 +246,15 @@ class _GpuProducer:
 class RendererPool:
     """Keep GPU-buffer owners alive until the complete ingestion graph drains."""
 
-    def __init__(self, library, rgb_pool_bytes=None):
+    def __init__(self, library, rgb_pool_bytes=None, cost_aware=False):
         self.library = library
         self.rgb_pool_bytes = _rgb_pool_capacity() if rgb_pool_bytes is None else rgb_pool_bytes
         self.producers = {}
         self.next_gpu = 0
+        self.cost_aware = cost_aware
+        self._reservations = {}
+        self._next_reservation = 0
+        self._dispatch = {}
 
     def get(self, node_id, gpu_uuid):
         import ray
@@ -262,22 +275,63 @@ class RendererPool:
             ).remote(self.library, gpu_uuid)
         return self.producers[key]
 
-    async def get_next(self, node_id):
+    async def get_next(self, node_id, estimated_scene_bytes=1):
         # Model constructors register their Ray-assigned GPUs. Awaiting lets
         # registration proceed while CPU frontends retain their native scenes.
         while True:
-            available = [actor for (node, _), actor in self.producers.items() if node == node_id]
+            available = [key for key in self.producers if key[0] == node_id]
             if available:
-                result = available[self.next_gpu % len(available)]
+                offset = self.next_gpu % len(available)
+                available = available[offset:] + available[:offset]
                 self.next_gpu += 1
-                return result
+                if not self.cost_aware:
+                    return self.producers[available[0]]
+                if estimated_scene_bytes <= 0:
+                    raise ValueError("Estimated scene bytes must be positive")
+                for key in available:
+                    self._dispatch.setdefault(
+                        key,
+                        dict(
+                            dispatched_batches=0,
+                            dispatched_scene_bytes=0,
+                            pending_batches=0,
+                            pending_scene_bytes=0,
+                            peak_pending_scene_bytes=0,
+                        ),
+                    )
+                key = min(available, key=lambda item: self._dispatch[item]["pending_scene_bytes"])
+                stats = self._dispatch[key]
+                stats["dispatched_batches"] += 1
+                stats["dispatched_scene_bytes"] += estimated_scene_bytes
+                stats["pending_batches"] += 1
+                stats["pending_scene_bytes"] += estimated_scene_bytes
+                stats["peak_pending_scene_bytes"] = max(stats["peak_pending_scene_bytes"], stats["pending_scene_bytes"])
+                reservation = self._next_reservation
+                self._next_reservation += 1
+                self._reservations[reservation] = (key, estimated_scene_bytes)
+                return {"producer": self.producers[key], "reservation": reservation}
             await asyncio.sleep(0.05)
+
+    def release(self, reservation):
+        work = self._reservations.pop(reservation, None)
+        if work is None:
+            return False
+        key, scene_bytes = work
+        self._dispatch[key]["pending_scene_bytes"] -= scene_bytes
+        self._dispatch[key]["pending_batches"] -= 1
+        return True
 
     async def close(self):
         import ray
 
         try:
-            return await asyncio.gather(*[actor.status.remote() for actor in self.producers.values()])
+            entries = list(self.producers.items())
+            statuses = await asyncio.gather(*[actor.status.remote() for _, actor in entries])
+            if self.cost_aware:
+                for (key, _), status in zip(entries, statuses):
+                    status["dispatch_policy"] = "pending_scene_bytes"
+                    status["dispatch"] = dict(self._dispatch.get(key, {}))
+            return statuses
         finally:
             for actor in self.producers.values():
                 ray.kill(actor)
@@ -360,10 +414,20 @@ def raise_stage_errors(frame, column):
 @nvtx.annotate("nrl.cuda_rdt::submit_shared_scenes", color="green")
 def submit_scene_batch(scenes, pool):
     """Keep native command memfds alive until GPU replay has consumed them."""
+    if not scenes:
+        return []
     import ray
 
-    producer = ray.get(pool.get_next.remote(ray.get_runtime_context().get_node_id()))
     handles = [scene.handle() for scene in scenes]
-    reference = ray.get(producer.render_handles.remote(handles))["reference"]
+    selection = ray.get(
+        pool.get_next.remote(ray.get_runtime_context().get_node_id(), sum(handle.size for handle in handles))
+    )
+    reserved = isinstance(selection, dict)
+    producer = selection["producer"] if reserved else selection
+    try:
+        reference = ray.get(producer.render_handles.remote(handles))["reference"]
+    finally:
+        if reserved:
+            ray.get(pool.release.remote(selection["reservation"]))
     shapes = tuple((scene.height, scene.width) for scene in scenes)
     return [GpuPageImage(reference, index, scene.height, scene.width, shapes) for index, scene in enumerate(scenes)]
