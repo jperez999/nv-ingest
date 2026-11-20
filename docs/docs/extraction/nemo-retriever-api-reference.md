@@ -251,10 +251,12 @@ Refer to
 for sizing, allocation behavior, and validation limits.
 
 Set `CUDA_PDF_COST_AWARE_SCHEDULING=1` in the NRL driver environment to
-select renderer producers by pending encoded scene bytes on the same node.
-Unset or `0` retains round-robin dispatch. Only `0` and `1` are accepted;
-invalid values fail driver setup. Scene bytes estimate queued work, not GPU
-execution time. Refer to
+spread batches containing at least 128 MiB of encoded scenes across same-node
+renderer producers. Smaller batches retain round-robin dispatch across all
+producers, including those processing heavy batches. Unset or `0` retains
+round-robin dispatch for every batch. Only `0` and `1` are accepted; invalid
+values fail driver setup. Scene bytes are a heuristic, not measured GPU time.
+Refer to
 [Balance pending renderer work](performance_guide.md#balance-pending-renderer-work)
 for accounting and validation limits.
 

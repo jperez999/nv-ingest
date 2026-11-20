@@ -42,6 +42,21 @@ def test_heavy_batches_use_different_producers_until_work_finishes():
     assert not pool._reservations
     assert all(info["pending_scene_bytes"] == info["pending_batches"] == 0 for info in pool._dispatch.values())
     assert pool._dispatch[("node", "gpu-a")]["peak_pending_scene_bytes"] == 4_000_000_010
+    assert all(info["pending_heavy_batches"] == 0 for info in pool._dispatch.values())
+
+
+def test_normal_batches_still_feed_a_gpu_with_heavy_work():
+    pool = pool_with_producers(True)
+    heavy = asyncio.run(pool.get_next("node", 5_000_000_000))
+    small_a = asyncio.run(pool.get_next("node", 10))
+    small_b = asyncio.run(pool.get_next("node", 10))
+    assert small_a["producer"] is not heavy["producer"]
+    assert small_b["producer"] is heavy["producer"]
+    next_heavy = asyncio.run(pool.get_next("node", 2_000_000_000))
+    assert next_heavy["producer"] is not heavy["producer"]
+    for work in (heavy, small_a, small_b, next_heavy):
+        pool.release(work["reservation"])
+    assert all(info["pending_heavy_batches"] == 0 for info in pool._dispatch.values())
 
 
 @pytest.mark.parametrize("raw,expected", [(None, False), ("0", False), ("1", True)])

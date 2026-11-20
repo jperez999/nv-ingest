@@ -226,9 +226,11 @@ class _GpuProducer:
             return {"reference": ray.put(results, _tensor_transport="nixl")}
 
     def status(self):
+        import os
         import torch
 
         return {
+            "producer_pid": os.getpid(),
             "pages": self.pages,
             "gpu_uuid": self.gpu_uuid,
             "rgb_readback_bytes": 0,
@@ -252,6 +254,7 @@ class RendererPool:
         self.producers = {}
         self.next_gpu = 0
         self.cost_aware = cost_aware
+        self.heavy_scene_bytes = 128 * 1024**2
         self._reservations = {}
         self._next_reservation = 0
         self._dispatch = {}
@@ -294,21 +297,43 @@ class RendererPool:
                         dict(
                             dispatched_batches=0,
                             dispatched_scene_bytes=0,
+                            dispatched_heavy_batches=0,
                             pending_batches=0,
                             pending_scene_bytes=0,
+                            pending_heavy_batches=0,
                             peak_pending_scene_bytes=0,
+                            peak_pending_heavy_batches=0,
                         ),
                     )
-                key = min(available, key=lambda item: self._dispatch[item]["pending_scene_bytes"])
+                heavy = estimated_scene_bytes >= self.heavy_scene_bytes
+                # Keep normal work on every GPU: a long ordered page does not
+                # necessarily occupy all its CUDA cores. Only spread big batches.
+                key = (
+                    min(
+                        available,
+                        key=lambda item: (
+                            self._dispatch[item]["pending_heavy_batches"],
+                            self._dispatch[item]["pending_scene_bytes"],
+                        ),
+                    )
+                    if heavy
+                    else available[0]
+                )
                 stats = self._dispatch[key]
                 stats["dispatched_batches"] += 1
                 stats["dispatched_scene_bytes"] += estimated_scene_bytes
                 stats["pending_batches"] += 1
                 stats["pending_scene_bytes"] += estimated_scene_bytes
+                if heavy:
+                    stats["dispatched_heavy_batches"] += 1
+                    stats["pending_heavy_batches"] += 1
                 stats["peak_pending_scene_bytes"] = max(stats["peak_pending_scene_bytes"], stats["pending_scene_bytes"])
+                stats["peak_pending_heavy_batches"] = max(
+                    stats["peak_pending_heavy_batches"], stats["pending_heavy_batches"]
+                )
                 reservation = self._next_reservation
                 self._next_reservation += 1
-                self._reservations[reservation] = (key, estimated_scene_bytes)
+                self._reservations[reservation] = (key, estimated_scene_bytes, heavy)
                 return {"producer": self.producers[key], "reservation": reservation}
             await asyncio.sleep(0.05)
 
@@ -316,9 +341,11 @@ class RendererPool:
         work = self._reservations.pop(reservation, None)
         if work is None:
             return False
-        key, scene_bytes = work
+        key, scene_bytes, heavy = work
         self._dispatch[key]["pending_scene_bytes"] -= scene_bytes
         self._dispatch[key]["pending_batches"] -= 1
+        if heavy:
+            self._dispatch[key]["pending_heavy_batches"] -= 1
         return True
 
     async def close(self):
@@ -329,7 +356,8 @@ class RendererPool:
             statuses = await asyncio.gather(*[actor.status.remote() for _, actor in entries])
             if self.cost_aware:
                 for (key, _), status in zip(entries, statuses):
-                    status["dispatch_policy"] = "pending_scene_bytes"
+                    status["dispatch_policy"] = "spread_heavy_batches"
+                    status["heavy_scene_threshold_bytes"] = self.heavy_scene_bytes
                     status["dispatch"] = dict(self._dispatch.get(key, {}))
             return statuses
         finally:

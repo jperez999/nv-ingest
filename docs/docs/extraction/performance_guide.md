@@ -315,34 +315,45 @@ retrieval accuracy before accepting a throughput result.
 
 ### Balance pending renderer work
 
-Native `cuda_rdt` ingestion can select renderer producers by pending work
-instead of round-robin dispatch. Set `CUDA_PDF_COST_AWARE_SCHEDULING=1` in
-the NRL driver environment before ingestion. Unset or `0` retains the existing
-round-robin policy. The driver accepts only `0` or `1`; other values fail setup.
-This option does not apply to the default PDFium or encoded CUDA renderer.
+Native `cuda_rdt` ingestion can spread heavy renderer batches across producers.
+Set `CUDA_PDF_COST_AWARE_SCHEDULING=1` in the NRL driver environment before
+ingestion. Unset or `0` retains the existing round-robin policy for every
+batch. The driver accepts only `0` or `1`; other values fail setup. This option
+does not apply to the default PDFium or encoded CUDA renderer.
 
-For each batch, the enabled policy selects a registered producer on the same
-node with the lowest total pending encoded scene bytes. It reserves the
-batch's scene bytes while its rendering request is outstanding, then releases
-that reservation when the request completes or raises an error. Shared-scene
-owners remain alive through replay, as on the existing GPU path.
+A heavy batch contains at least 128 MiB (134,217,728 bytes) of encoded scenes,
+summed across the batch's pages. This fixed threshold uses recorded drawing
+commands and resources, not source PDF file size or RGB image size. Heavy
+batches select a registered same-node producer with the fewest pending heavy
+batches, then the fewest pending encoded scene bytes. Round-robin ordering
+breaks ties.
 
-Encoded scene size is a workload proxy. It measures recorded drawing commands
-and resources, not observed GPU time, remaining kernel work, or RGB image size.
-The policy can assign different batches to producers without partitioning the
-corpus or changing model actor counts, index settings, or image transport.
-RGB pixels remain on the GPU.
+Smaller batches retain round-robin dispatch across all same-node producers,
+including producers already handling a heavy batch. A long page does not
+necessarily occupy every CUDA core, so this policy does not exclude those
+GPUs from ordinary work. Batch reservations track pending scene bytes and
+heavy-batch counts until the rendering request completes or raises an error.
+Shared-scene owners remain alive through replay, as on the existing GPU path.
 
-With this option enabled, final renderer audit records include
-`dispatch_policy="pending_scene_bytes"` and per-producer `dispatch` counters:
-`dispatched_batches`, `dispatched_scene_bytes`, `pending_batches`,
-`pending_scene_bytes`, and `peak_pending_scene_bytes`. Compare these counters
-with stage timings and complete ingestion throughput when evaluating balance.
-No counter alone establishes GPU utilization or a performance improvement.
+The threshold and scene sizes are workload heuristics. They do not measure
+GPU execution time or guarantee balanced completion times. The policy changes
+batch placement without partitioning the corpus or changing model actor
+counts, index settings, or image transport. RGB pixels remain on the GPU.
 
-Full-corpus correctness, retrieval, and performance validation of this
-scheduling policy remain pending. Earlier DC10K snapshots do not establish
-its accuracy or throughput.
+With this option enabled, final renderer audit records identify
+`dispatch_policy="spread_heavy_batches"` and
+`heavy_scene_threshold_bytes=134217728`. Per-producer `dispatch` counters
+include `dispatched_batches`, `dispatched_scene_bytes`,
+`dispatched_heavy_batches`, `pending_batches`, `pending_scene_bytes`,
+`pending_heavy_batches`, `peak_pending_scene_bytes`, and
+`peak_pending_heavy_batches`. Producer status also reports `producer_pid` and
+`gpu_uuid` for correlating profiler process rows with GPU placement.
+
+Compare these counters with stage timings and complete ingestion throughput
+when evaluating balance. No counter alone establishes GPU utilization or a
+performance improvement. Bounded correctness and full-corpus retrieval and
+performance validation of this heavy-batch policy remain pending. Earlier
+DC10K snapshots do not establish its accuracy or throughput.
 
 ### Reuse registered GPU RGB buffers
 
