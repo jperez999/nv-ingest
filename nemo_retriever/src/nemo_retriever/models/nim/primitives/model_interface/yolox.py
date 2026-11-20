@@ -997,17 +997,21 @@ def weighted_boxes_fusion(
     overall_boxes = []
     for label in filtered_boxes:
         boxes = filtered_boxes[label]
-        np.empty((0, 8))
+        cached_matches = _matching_boxes_bounded(boxes, iou_thr)
 
         clusters = []
 
         # Clusterize boxes
         for j in range(len(boxes)):
-            ids = [i for i in range(len(boxes)) if i != j]
-            index, best_iou = find_matching_box_fast(boxes[ids], boxes[j], iou_thr)
+            if cached_matches is None:
+                ids = [i for i in range(len(boxes)) if i != j]
+                index, _ = find_matching_box_fast(boxes[ids], boxes[j], iou_thr)
+                if index != -1:
+                    index = ids[index]
+            else:
+                index = int(cached_matches[j])
 
             if index != -1:
-                index = ids[index]
                 cluster_idx = [clust_idx for clust_idx, clust in enumerate(clusters) if (j in clust or index in clust)]
                 if len(cluster_idx):
                     cluster_idx = cluster_idx[0]
@@ -1135,6 +1139,32 @@ def prefilter_boxes(boxes, scores, labels, weights, thr, class_agnostic=False):
     return new_boxes
 
 
+def _matching_boxes_bounded(boxes: np.ndarray, match_iou: float) -> Optional[np.ndarray]:
+    """Compute the original per-box matches together with bounded workspace."""
+    n = len(boxes)
+    if n > 256 or boxes.dtype not in (np.dtype("float32"), np.dtype("float64")) or not np.isfinite(boxes).all():
+        return None
+    if n < 2:
+        return np.full(n, -1, dtype=np.int64)
+
+    xy = boxes[:, 4:]
+    x_a = np.maximum(xy[None, :, 0], xy[:, None, 0])
+    y_a = np.maximum(xy[None, :, 1], xy[:, None, 1])
+    x_b = np.minimum(xy[None, :, 2], xy[:, None, 2])
+    y_b = np.minimum(xy[None, :, 3], xy[:, None, 3])
+    intersection = np.maximum(x_b - x_a, 0) * np.maximum(y_b - y_a, 0)
+    area = (xy[:, 2] - xy[:, 0]) * (xy[:, 3] - xy[:, 1])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ious = intersection / (area[None, :] + area[:, None] - intersection)
+
+    # Removing self must leave the same first-maximum order as the original
+    # ascending list of all other indices, including ties between matches.
+    np.fill_diagonal(ious, -np.inf)
+    indices = np.argmax(ious, axis=1)
+    values = ious[np.arange(n), indices]
+    return np.where(values <= match_iou, -1, indices)
+
+
 def find_matching_box_fast(boxes_list, new_box, match_iou):
     """
     Reimplementation of find_matching_box with numpy instead of loops. Gives significant speed up for larger arrays
@@ -1185,6 +1215,18 @@ def get_biggest_box(boxes, conf_type="avg"):
     Returns:
         np array [8]: Merged box.
     """
+    if (
+        isinstance(boxes, np.ndarray)
+        and boxes.shape == (1, 8)
+        and boxes.dtype in (np.dtype("float32"), np.dtype("float64"))
+        and np.isfinite(boxes).all()
+    ):
+        # A singleton still rounds every field to float32 and replaces the
+        # model index, just like the reductions below.
+        box = np.array(boxes[0], dtype=np.float32, copy=True)
+        box[3] = -1
+        return box
+
     box = np.zeros(8, dtype=np.float32)
     box[4:] = boxes[0][4:]
     conf_list = []
